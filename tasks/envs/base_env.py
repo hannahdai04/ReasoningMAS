@@ -61,7 +61,7 @@ class BaseRecorder:
         self.current_task_id = task_id
         self.current_task_config = task_config
 
-    def task_end(self, reward: float, done: bool) -> None:
+    def task_end(self, reward: float, done: bool, **kwargs) -> None:
         
         if self.current_task_id is None or self.current_task_config is None:
             raise RuntimeError('The task id or the task config should not be None.')

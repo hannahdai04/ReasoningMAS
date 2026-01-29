@@ -111,7 +111,7 @@ class AlfworldRecorder(BaseRecorder):
         message: str = f'---------- Task: {task_id} ----------'
         self.log(message)
     
-    def task_end(self, reward: float, done: bool):
+    def task_end(self, reward: float, done: bool, **kwargs):
         gamefile: str = self.current_task_config['env_kwargs']['gamefile']
         env_name = get_env_name_from_gamefile(gamefile)
         if env_name is None:

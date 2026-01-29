@@ -1,0 +1,4 @@
+﻿# HotpotQA env config
+max_sentences_per_doc: 3
+max_hops: 4
+search_topk: 1

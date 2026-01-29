@@ -1,4 +1,5 @@
 from typing import Optional, Union
+from collections import Counter
 from langchain.docstore.document import Document
 import string
 import re
@@ -85,3 +86,22 @@ def match_exactly(answer, key) -> bool:
     n_answer = normalize_answer(answer)
     n_key = normalize_answer(key)
     return n_answer == n_key
+
+
+def f1_score(prediction: str, ground_truth: str) -> float:
+    pred_tokens = normalize_answer(prediction).split()
+    gt_tokens = normalize_answer(ground_truth).split()
+
+    if not pred_tokens and not gt_tokens:
+        return 1.0
+    if not pred_tokens or not gt_tokens:
+        return 0.0
+
+    common = Counter(pred_tokens) & Counter(gt_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
+        return 0.0
+
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(gt_tokens)
+    return 2 * precision * recall / (precision + recall)

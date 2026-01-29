@@ -11,12 +11,18 @@ Your task is to carefully analyze the input and provide the correct answer or gu
 NOTE: ** Your approach must avoid being consistent with the previous output's approach (as the previous output comes from a solver agent that has already fallen into a misconception, making it definitely wrong). **
 """
 
+retriever_system_prompt: str = """
+You are a retrieval-focused agent. Your job is to propose the next Search[...] or Lookup[...] action that will most efficiently gather evidence.
+Do not answer the question directly. Do not output Finish[...].
+"""
+
 
 
 @dataclass
 class AutoGenPrompt:
     solver_system_prompt: str = solver_system_prompt
     ground_truth_system_prompt: str = ground_truth_system_prompt
+    retriever_system_prompt: str = retriever_system_prompt
 
 AUTOGEN_PROMPT = AutoGenPrompt()
 

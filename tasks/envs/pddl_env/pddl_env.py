@@ -327,7 +327,7 @@ class PDDLRecorder(BaseRecorder):
         message: str = f'---------- Task: {task_id} ----------'
         self.log(message)
     
-    def task_end(self, reward: float, done: bool):
+    def task_end(self, reward: float, done: bool, **kwargs):
         game_name: str = self.current_task_config.get('game_name') 
         if game_name is None:
             raise ValueError('The task should have an attribute: `game`.')

@@ -106,9 +106,16 @@ def run_task(task_manager: TaskManager) -> None:
             task_manager.recorder.log(f'------------ MAS Agent: {agent.name} ------------')
             task_manager.recorder.log(agent.add_task_instruction(task_instruction))
 
-        reward, done = task_manager.mas.schedule(task_config) 
-    
-        task_manager.recorder.task_end(reward, done)             
+        reward, done = task_manager.mas.schedule(task_config)
+
+        metrics = {}
+        if hasattr(task_manager.mas.env, 'get_metrics'):
+            try:
+                metrics = task_manager.mas.env.get_metrics() or {}
+            except Exception:
+                metrics = {}
+
+        task_manager.recorder.task_end(reward, done, **metrics)             
     
     task_manager.recorder.dataset_end()
 
@@ -119,7 +126,7 @@ if __name__ == '__main__':
     random.seed(42)
 
     parser = argparse.ArgumentParser(description='Run tasks with specified modules.')
-    parser.add_argument('--task', type=str, choices=['alfworld', 'fever', 'pddl'])
+    parser.add_argument('--task', type=str, choices=['alfworld', 'fever', 'pddl', 'hotpotqa'])
     parser.add_argument('--mas_type', type=str, choices=['autogen', 'macnet', 'dylan'])
     parser.add_argument('--mas_memory', type=str, default='none', help='Specify mas memory module')
     parser.add_argument('--reasoning', type=str, default='io', help='Specify reasoning module')

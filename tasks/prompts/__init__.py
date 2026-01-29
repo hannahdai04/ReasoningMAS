@@ -1,12 +1,14 @@
 from .alfworld_prompt import alfworld_solver_system_prompt, alfworld_few_shots
 from .fever_prompt import fever_solver_system_prompt, fever_few_shots
+from .hotpotqa_prompt import hotpotqa_solver_system_prompt, hotpotqa_few_shots
 from .pddl_prompt import pddl_prompts
 
 def get_dataset_system_prompt(task: str, task_config: dict) -> str:
     prompt_map: dict = {
         'alfworld': alfworld_solver_system_prompt,
         'fever': fever_solver_system_prompt,
-        'pddl': pddl_prompts
+        'pddl': pddl_prompts,
+        'hotpotqa': hotpotqa_solver_system_prompt
     }
 
     if prompt_map.get(task) is None:
@@ -30,6 +32,8 @@ def get_task_few_shots(dataset: str, task_config: dict, few_shots_num: int) -> l
     
     elif dataset == 'fever':
         return fever_few_shots[:few_shots_num]
+    elif dataset == 'hotpotqa':
+        return hotpotqa_few_shots[:few_shots_num]
     
     elif dataset == 'pddl':
         task_type = task_config.get('game_name')

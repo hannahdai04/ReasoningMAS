@@ -17,6 +17,7 @@ class AutoGen(MetaMAS):
     def __post_init__(self):
 
         self.solver_name: str = 'solver'
+        self.retriever_name: str = 'retriever'
         self.ground_truth_name: str = 'ground_truth'
         self.observers = []   
 
@@ -48,6 +49,14 @@ class AutoGen(MetaMAS):
             memory_module=None
         )
 
+        retriever_agent: Agent = Agent(
+            name=self.retriever_name,
+            role='retriever',
+            system_instruction=AUTOGEN_PROMPT.retriever_system_prompt,
+            reasoning_module=reasoning,
+            memory_module=None
+        )
+
         ground_truth_agent: Agent = Agent(
             name=self.ground_truth_name,
             role="ground truth agent",
@@ -60,6 +69,7 @@ class AutoGen(MetaMAS):
         
         self.hire([
             solver_agent,
+            retriever_agent,
             ground_truth_agent
         ])
         self.set_env(env_executor)
@@ -96,6 +106,7 @@ class AutoGen(MetaMAS):
         # Initialize environment and agents
         env: Env = self.env
         solver: Agent = self.get_agent(self.solver_name)
+        retriever: Agent = self.get_agent(self.retriever_name)
         ground_truth: Agent = self.get_agent(self.ground_truth_name)
         env.reset()
         
@@ -132,12 +143,45 @@ class AutoGen(MetaMAS):
         
         for i in range(env.max_trials):    
             
+            retriever_prompt: str = format_task_prompt_with_insights(
+                few_shots=few_shots, 
+                memory_few_shots=successful_shots,
+                insights=roles_rules.get(retriever.profile, raw_rules),
+                task_description=self.meta_memory.summarize()
+            )
+            retriever_action: str = ''
+            tries = 0
+            while tries < 3:
+                try:
+                    retriever_action = retriever.response(retriever_prompt, self.reasoning_config)
+                    if retriever_action == '':
+                        continue
+                    retriever_action = env.process_action(retriever_action)
+                    break
+                except Exception as e:
+                    print(f'Error during execution of retriever agent: {e}')
+                tries += 1
+
+            if retriever_action.startswith('Finish['):
+                retriever_action = ''
+
+            if retriever_action != '':
+                retriever_message: AgentMessage = AgentMessage(
+                    agent_name=retriever.name,
+                    system_instruction=retriever.system_instruction,
+                    user_instruction=retriever_prompt,
+                    message=retriever_action,
+                )
+                self.meta_memory.add_agent_node(retriever_message, upstream_agent_ids=[])
+
             user_prompt: str = format_task_prompt_with_insights(
                 few_shots=few_shots, 
                 memory_few_shots=successful_shots,
                 insights=roles_rules.get(solver.profile, raw_rules),
                 task_description=self.meta_memory.summarize()
             )
+            if retriever_action != '':
+                user_prompt = f\"{user_prompt}\\n\\nRetriever suggestion: {retriever_action}\"
             tries = 0
             
             while tries < 3:
@@ -161,6 +205,8 @@ class AutoGen(MetaMAS):
                     insights=roles_rules.get(ground_truth.profile, raw_rules),
                     task_description=self.meta_memory.summarize()
                 )
+                if retriever_action != '':
+                    user_prompt = f\"{user_prompt}\\n\\nRetriever suggestion: {retriever_action}\"
                 tries = 0
                 while tries < 3:
                     try: 

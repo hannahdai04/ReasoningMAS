@@ -3,12 +3,14 @@ import json
 from .base_env import BaseEnv, BaseRecorder
 from .alfworld_env import AlfworldEnv, AlfworldRecorder, get_env_name_from_gamefile, prefixes
 from .fever_env import FeverEnv, FeverRecorder
+from .hotpotqa_env import HotpotQAEnv, HotpotQARecorder
 from .pddl_env.pddl_env import PDDLEnv, PDDLRecorder, get_all_environment_configs
 
 TASKS_PATH = {
     'alfworld': 'data/alfworld/alfworld_tasks_suffix.json',
     'fever': 'data/fever/fever_dev.jsonl',
-    'pddl': 'data/pddl/test.jsonl'  
+    'pddl': 'data/pddl/test.jsonl',
+    'hotpotqa': 'data/hotpotqa/hotpot_dev_distractor_v1.json'
 }
 
 ## Tasks
@@ -34,6 +36,18 @@ with open(TASKS_PATH['fever'], 'r') as f:
         for row in (json.loads(line) for line in f) 
     ][:100]
 
+with open(TASKS_PATH['hotpotqa'], 'r') as f:
+    hotpotqa_tasks = [
+        {
+            'task': row.get('question'),
+            'answer': row.get('answer'),
+            'context': row.get('context', []),
+            'supporting_facts': row.get('supporting_facts', []),
+            'env_name': 'hotpotqa',
+        }
+        for row in json.load(f)
+    ][:200]
+
 
 TASK_NAMES = ["barman", "blockworld", "gripper", "tyreworld"]
 pddl_tasks: list[dict] = get_all_environment_configs(TASK_NAMES, TASKS_PATH['pddl'])
@@ -42,19 +56,22 @@ pddl_tasks: list[dict] = get_all_environment_configs(TASK_NAMES, TASKS_PATH['pdd
 TASK_DATA = {
     'alfworld': alfworld_tasks,
     'fever': fever_tasks,
-    'pddl': pddl_tasks
+    'pddl': pddl_tasks,
+    'hotpotqa': hotpotqa_tasks
 }
 
 ENVS = {
     'alfworld': AlfworldEnv,
     'fever': FeverEnv,
-    'pddl': PDDLEnv
+    'pddl': PDDLEnv,
+    'hotpotqa': HotpotQAEnv
 }
 
 RECORDERS = {
     'alfworld': AlfworldRecorder,
     'fever': FeverRecorder,
-    'pddl': PDDLRecorder
+    'pddl': PDDLRecorder,
+    'hotpotqa': HotpotQARecorder
 }
 
 

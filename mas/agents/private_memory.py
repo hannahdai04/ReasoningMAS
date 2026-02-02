@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import json
+from mas.memory.utils import cosine_similarity
 
 
 # ========== 数据结构定义 ==========
@@ -183,6 +184,8 @@ class AgentPrivateMemory:
         max_hypotheses: int = 10
     ):
         self.agent_name = agent_name
+        self._embedding_func = None
+        self._embedding_cache: Dict[str, list] = {}
 
         # 六大模块
         self.role_contract = RoleContract(role_name=role)
@@ -201,6 +204,10 @@ class AgentPrivateMemory:
         self.turn_counter = 0
 
     # ========== 1. Role Contract 操作 ==========
+
+    def set_embedding_func(self, embedding_func: Any):
+        """Inject an embedding function for vector retrieval."""
+        self._embedding_func = embedding_func
 
     def set_role_contract(
         self,
@@ -398,6 +405,157 @@ class AgentPrivateMemory:
         """更新当前状态摘要"""
         self.working_context.current_state_summary = summary
 
+    # ========== 检索功能（关键！）==========
+
+    def retrieve_relevant(
+        self,
+        current_query: str,
+        current_state: str = "",
+        top_k: int = 3,
+        use_vector: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """
+        基于当前查询和状态检索相关的私有记忆
+
+        Args:
+            current_query: 当前要解决的问题/任务
+            current_state: 当前任务状态描述
+            top_k: 返回最相关的top-k条记忆
+
+        Returns:
+            检索结果字典
+        """
+        if use_vector is None:
+            use_vector = self._embedding_func is not None
+
+        if use_vector and self._embedding_func is not None:
+            return self._retrieve_relevant_vector(current_query=current_query, top_k=top_k)
+
+        results = {
+            "relevant_reasoning": [],
+            "relevant_hypotheses": [],
+            "relevant_evidence": [],
+            "recent_interactions": [],
+            "current_context": None
+        }
+
+        # 提取查询关键词（简单方法，生产环境应使用向量检索）
+        query_keywords = set(current_query.lower().split())
+
+        # 1. 检索相关推理步骤
+        if self.evidence_trace.reasoning_chain:
+            reasoning_scores = []
+            for step in self.evidence_trace.reasoning_chain:
+                step_text = f"{step.premise} {step.conclusion}".lower()
+                step_keywords = set(step_text.split())
+                overlap = len(query_keywords & step_keywords)
+                reasoning_scores.append((step, overlap))
+
+            reasoning_scores.sort(key=lambda x: x[1], reverse=True)
+            results["relevant_reasoning"] = [step for step, score in reasoning_scores[:top_k] if score > 0]
+
+            # 如果没有相关性，返回最近的
+            if not results["relevant_reasoning"]:
+                results["relevant_reasoning"] = self.evidence_trace.get_recent_reasoning(top_k)
+
+        # 2. 检索高置信度假设
+        top_hypos = self.hypotheses_store.get_top_hypotheses(top_k)
+        results["relevant_hypotheses"] = top_hypos
+
+        # 3. 检索相关证据
+        if self.evidence_trace.evidences:
+            evidence_scores = []
+            for eid, evidence in self.evidence_trace.evidences.items():
+                evidence_text = evidence.content.lower()
+                evidence_keywords = set(evidence_text.split())
+                overlap = len(query_keywords & evidence_keywords)
+                evidence_scores.append((evidence, overlap, evidence.relevance))
+
+            # 综合考虑关键词匹配和relevance分数
+            evidence_scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
+            results["relevant_evidence"] = [e for e, _, _ in evidence_scores[:top_k]]
+
+        # 4. 最近交互
+        results["recent_interactions"] = self.working_context.get_recent_interactions(top_k)
+
+        # 5. 当前上下文
+        if self.working_context.current_state_summary:
+            results["current_context"] = self.working_context.current_state_summary
+
+        return results
+
+    def _embed_text(self, text: str) -> list:
+        if text in self._embedding_cache:
+            return self._embedding_cache[text]
+        embedding = self._embedding_func.embed_query(text)
+        self._embedding_cache[text] = embedding
+        return embedding
+
+    def _retrieve_relevant_vector(self, current_query: str, top_k: int = 3) -> Dict[str, Any]:
+        results = {
+            "relevant_reasoning": [],
+            "relevant_hypotheses": [],
+            "relevant_evidence": [],
+            "recent_interactions": [],
+            "current_context": None
+        }
+
+        query_embedding = self._embed_text(current_query)
+
+        # Reasoning steps
+        if self.evidence_trace.reasoning_chain:
+            reasoning_scores = []
+            for step in self.evidence_trace.reasoning_chain:
+                step_text = f"{step.premise} {step.conclusion}"
+                score = cosine_similarity(query_embedding, self._embed_text(step_text))
+                reasoning_scores.append((score, step))
+            reasoning_scores.sort(key=lambda x: x[0], reverse=True)
+            results["relevant_reasoning"] = [step for _, step in reasoning_scores[:top_k]]
+
+            if not results["relevant_reasoning"]:
+                results["relevant_reasoning"] = self.evidence_trace.get_recent_reasoning(top_k)
+
+        # Hypotheses
+        if self.hypotheses_store.hypotheses:
+            hypo_scores = []
+            for hypo in self.hypotheses_store.hypotheses.values():
+                hypo_text = " ".join([hypo.content] + hypo.pros + hypo.cons + hypo.risks)
+                score = cosine_similarity(query_embedding, self._embed_text(hypo_text))
+                hypo_scores.append((score, hypo))
+            hypo_scores.sort(key=lambda x: x[0], reverse=True)
+            results["relevant_hypotheses"] = [h for _, h in hypo_scores[:top_k]]
+
+            if not results["relevant_hypotheses"]:
+                results["relevant_hypotheses"] = self.hypotheses_store.get_top_hypotheses(top_k)
+
+        # Evidence
+        if self.evidence_trace.evidences:
+            evidence_scores = []
+            for evidence in self.evidence_trace.evidences.values():
+                evidence_text = f"{evidence.content} {evidence.source}"
+                score = cosine_similarity(query_embedding, self._embed_text(evidence_text))
+                evidence_scores.append((score, evidence))
+            evidence_scores.sort(key=lambda x: (x[0], x[1].relevance), reverse=True)
+            results["relevant_evidence"] = [e for _, e in evidence_scores[:top_k]]
+
+        # Interactions
+        if self.working_context.recent_interactions:
+            inter_scores = []
+            for record in self.working_context.recent_interactions:
+                score = cosine_similarity(query_embedding, self._embed_text(record.content))
+                inter_scores.append((score, record))
+            inter_scores.sort(key=lambda x: x[0], reverse=True)
+            results["recent_interactions"] = [r for _, r in inter_scores[:top_k]]
+
+            if not results["recent_interactions"]:
+                results["recent_interactions"] = self.working_context.get_recent_interactions(top_k)
+
+        # Current context
+        if self.working_context.current_state_summary:
+            results["current_context"] = self.working_context.current_state_summary
+
+        return results
+
     # ========== 记忆检索与格式化（核心功能）==========
 
     def format_for_prompt(
@@ -411,7 +569,8 @@ class AgentPrivateMemory:
         max_recent_interactions: int = 5,
         max_recent_reasoning: int = 3,
         max_top_hypotheses: int = 3,
-        compact: bool = False
+        compact: bool = False,
+        retrieved_data: Dict[str, Any] = None  # 新增：使用检索数据
     ) -> str:
         """
         格式化记忆为prompt字符串，用于添加到agent的上下文中
@@ -420,12 +579,30 @@ class AgentPrivateMemory:
             include_*: 控制包含哪些模块
             max_*: 控制各模块的条目数
             compact: 是否使用紧凑格式（节省token）
+            retrieved_data: 检索得到的相关数据（如果为None则使用默认逻辑）
 
         Returns:
             格式化的记忆字符串
         """
         sections = []
         separator = "\n" if compact else "\n\n"
+
+        # 使用检索数据或默认数据
+        if retrieved_data:
+            relevant_reasoning = retrieved_data.get("relevant_reasoning", [])
+            relevant_hypotheses = retrieved_data.get("relevant_hypotheses", [])
+            relevant_evidence = retrieved_data.get("relevant_evidence", [])
+            recent_interactions = retrieved_data.get("recent_interactions", [])
+        else:
+            # 兜底：使用默认逻辑
+            relevant_reasoning = self.evidence_trace.get_recent_reasoning(max_recent_reasoning)
+            relevant_hypotheses = self.hypotheses_store.get_top_hypotheses(max_top_hypotheses)
+            relevant_evidence = sorted(
+                self.evidence_trace.evidences.values(),
+                key=lambda x: x.relevance,
+                reverse=True
+            )[:3]
+            recent_interactions = self.working_context.get_recent_interactions(max_recent_interactions)
 
         # 1. Role Contract
         if include_role_contract and self.role_contract.responsibilities:
@@ -453,34 +630,26 @@ class AgentPrivateMemory:
                 sections.append("\n".join(plan_lines))
 
         # 3. Hypotheses
-        if include_hypotheses:
-            top_hypos = self.hypotheses_store.get_top_hypotheses(max_top_hypotheses)
-            if top_hypos:
-                hypo_lines = ["【Hypotheses】"]
-                for h in top_hypos:
-                    status = "✓" if h.verified else f"~{h.confidence:.1f}"
-                    risks_txt = f" ⚠ {h.risks[0]}" if h.risks else ""
-                    hypo_lines.append(f"{status} {h.content}{risks_txt}")
-                sections.append("\n".join(hypo_lines))
+        if include_hypotheses and relevant_hypotheses:
+            hypo_lines = ["【Hypotheses】"]
+            for h in relevant_hypotheses:
+                status = "✓" if h.verified else f"~{h.confidence:.1f}"
+                risks_txt = f" ⚠ {h.risks[0]}" if h.risks else ""
+                hypo_lines.append(f"{status} {h.content}{risks_txt}")
+            sections.append("\n".join(hypo_lines))
 
         # 4. Evidence & Reasoning
         if include_evidence:
-            recent_reasoning = self.evidence_trace.get_recent_reasoning(max_recent_reasoning)
-            if recent_reasoning:
+            if relevant_reasoning:
                 ev_lines = ["【Reasoning】"]
-                for step in recent_reasoning:
+                for step in relevant_reasoning:
                     ev_lines.append(f"∵ {step.premise} ∴ {step.conclusion}")
                 sections.append("\n".join(ev_lines))
 
             # 关键证据
-            top_evidences = sorted(
-                self.evidence_trace.evidences.values(),
-                key=lambda x: x.relevance,
-                reverse=True
-            )[:3]
-            if top_evidences:
+            if relevant_evidence:
                 sections.append(
-                    "【Evidence】" + "; ".join([f"{e.content} ({e.source})" for e in top_evidences])
+                    "【Evidence】" + "; ".join([f"{e.content} ({e.source})" for e in relevant_evidence])
                 )
 
         # 5. Peer Profiles（可选，默认关闭以节省token）
@@ -505,10 +674,9 @@ class AgentPrivateMemory:
                 context_parts.append(f"Recent: {' | '.join(recent_obs)}")
 
             # 最近交互
-            recent_inter = self.working_context.get_recent_interactions(max_recent_interactions)
-            if recent_inter:
+            if recent_interactions:
                 inter_txt = "; ".join([
-                    f"{r.peer_name}→{r.content[:30]}" for r in recent_inter
+                    f"{r.peer_name}→{r.content[:30]}" for r in recent_interactions
                 ])
                 context_parts.append(f"History: {inter_txt}")
 
@@ -587,3 +755,4 @@ class AgentPrivateMemory:
         self.working_context = WorkingContext(max_interactions=self.working_context.max_interactions)
         self.turn_counter = 0
         self.task_start_time = datetime.now().isoformat()
+        self._embedding_cache = {}

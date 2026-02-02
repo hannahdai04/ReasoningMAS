@@ -6,8 +6,10 @@ from mas.mas import MetaMAS
 from mas.reasoning import ReasoningBase, ReasoningConfig
 from mas.memory import MASMemoryBase, GMemory
 from mas.agents import Env
+from mas.agents.shared_memory import SharedMemory
+from mas.utils import EmbeddingFunc
 
-from .autogen_prompt import AUTOGEN_PROMPT 
+from .autogen_prompt import AUTOGEN_PROMPT
 from ..format import format_task_prompt_with_insights, format_task_context
 
 
@@ -58,6 +60,7 @@ class AutoGen(MetaMAS):
             enable_private_memory=True,
             private_memory_config=private_memory_config
         )
+        solver_agent.log_fn = self.notify_observers
 
         retriever_agent: Agent = Agent(
             name=self.retriever_name,
@@ -68,6 +71,7 @@ class AutoGen(MetaMAS):
             enable_private_memory=True,
             private_memory_config=private_memory_config
         )
+        retriever_agent.log_fn = self.notify_observers
 
         ground_truth_agent: Agent = Agent(
             name=self.ground_truth_name,
@@ -78,6 +82,16 @@ class AutoGen(MetaMAS):
             enable_private_memory=True,
             private_memory_config=private_memory_config
         )
+        ground_truth_agent.log_fn = self.notify_observers
+
+        self._use_vector_retrieval: bool = config.get('use_vector_retrieval', True)
+        if self._use_vector_retrieval:
+            embed_model = config.get('embedding_model', "sentence-transformers/all-MiniLM-L6-v2")
+            self._embedding_func = EmbeddingFunc(embed_model)
+            for agent in [solver_agent, retriever_agent, ground_truth_agent]:
+                if agent.private_memory:
+                    agent.private_memory.set_embedding_func(self._embedding_func)
+            SharedMemory().set_embedding_func(self._embedding_func)
 
         env_executor = env
 
@@ -111,6 +125,12 @@ class AutoGen(MetaMAS):
         Returns:
         - tuple[float, bool]: Returns the final reward and whether the task was successfully completed.
         """
+        def _short(text: str, max_len: int = 160) -> str:
+            if text is None:
+                return ""
+            text = str(text).replace("\n", " ").strip()
+            return text if len(text) <= max_len else text[:max_len] + "..."
+
         if task_config.get('task_main') is None:
             raise ValueError("Missing required keys `task_main` in task_config")
         if task_config.get('task_description') is None:
@@ -126,8 +146,14 @@ class AutoGen(MetaMAS):
         retriever: Agent = self.get_agent(self.retriever_name)
         ground_truth: Agent = self.get_agent(self.ground_truth_name)
         env.reset()
-        
+
         self.meta_memory.init_task_context(task_main, task_description)
+
+        # ========== 初始化共享记忆（新增）==========
+        shared_mem = SharedMemory()
+        shared_mem.reset(task_description=task_main)
+        self.notify_observers("[Shared Memory] Initialized for new task")
+        self.notify_observers(f"[Shared Memory] Global context: {shared_mem.get_global_context()[:100]}...")
 
         # 重置所有agent的私有memory（新任务开始）
         if solver.private_memory:
@@ -136,23 +162,65 @@ class AutoGen(MetaMAS):
             retriever.private_memory.reset()
         if ground_truth.private_memory:
             ground_truth.private_memory.reset()
+        self.notify_observers("[Private Memory] Reset for all agents")
 
-        # Retrieve successful trajectories and insights from memory
+        # ========== 多层Memory检索（新增）==========
+        # Step 1: 从Private Memory检索（agent自身的经验）
+        solver_private_insights = []
+        if solver.private_memory and hasattr(solver.private_memory, 'get_recent_successes'):
+            solver_private_insights = solver.private_memory.get_recent_successes(topk=2)
+            self.notify_observers(f"[Private Memory] Solver retrieved {len(solver_private_insights)} past successes")
+
+        # Step 2: 从Shared Memory检索（团队共享的知识）
+        shared_insights = shared_mem.retrieve_relevant_insights(query=task_main, topk=3)
+        shared_collaboration_patterns = shared_mem.get_collaboration_history()
+        self.notify_observers(f"[Shared Memory] Retrieved {len(shared_insights)} insights, {len(shared_collaboration_patterns)} collaboration patterns")
+
+        # Step 3: 从Meta Memory检索（跨任务的长期记忆）
         successful_trajectories: list[MASMessage]
+        failed_trajectories: list[MASMessage]
         insights: list[dict]
 
-        successful_trajectories, _, insights = self.meta_memory.retrieve_memory(
+        successful_trajectories, failed_trajectories, insights = self.meta_memory.retrieve_memory(
             query_task=task_main,
             successful_topk=self._successful_topk,
             failed_topk=self._failed_topk,
             insight_topk=self._insights_topk,
             threshold=self._threshold
         )
+        self.notify_observers(
+            f"[Meta Memory] Retrieved {len(successful_trajectories)} success, "
+            f"{len(failed_trajectories)} failed, {len(insights)} insights"
+        )
+        for idx, traj in enumerate(successful_trajectories):
+            self.notify_observers(f"[Meta Memory][Success#{idx+1}] task_main={_short(traj.task_main, 100)}")
+            key_steps = traj.get_extra_field('key_steps')
+            if key_steps:
+                self.notify_observers(f"[Meta Memory][Success#{idx+1}] key_steps={_short(key_steps, 200)}")
+            self.notify_observers(f"[Meta Memory][Success#{idx+1}] traj={_short(traj.task_trajectory, 200)}")
+        for idx, traj in enumerate(failed_trajectories):
+            self.notify_observers(f"[Meta Memory][Failed#{idx+1}] task_main={_short(traj.task_main, 100)}")
+            fail_reason = traj.get_extra_field('fail_reason')
+            self.notify_observers(f"[Meta Memory][Failed#{idx+1}] fail_reason={_short(fail_reason, 200) or 'N/A'}")
+        if insights:
+            for idx, insight in enumerate(insights):
+                self.notify_observers(f"[Meta Memory][Insight#{idx+1}] {_short(insight, 200)}")
+        if failed_trajectories:
+            self.notify_observers("[Usage] Failed trajectories retrieved but NOT injected into prompts (current behavior).")
         successful_shots: list[str] = [format_task_context(
             traj.task_description, traj.task_trajectory, traj.get_extra_field('key_steps')
         ) for traj in successful_trajectories]
         raw_rules: list[str] = [insight for insight in insights]
         roles_rules: dict[str, list[str]] = self._project_insights(raw_rules)
+        if not self._use_projector:
+            self.notify_observers("[Insights] Projector disabled (use_projector=False). Using raw insights for all roles.")
+        elif not isinstance(self.meta_memory, GMemory):
+            self.notify_observers("[Insights] Projector disabled (meta_memory is not GMemory). Using raw insights for all roles.")
+        else:
+            for role, rules in roles_rules.items():
+                self.notify_observers(f"[Insights][{role}] projected_insights={len(rules)}")
+        self.notify_observers(f"[Usage] Success cases injected into prompts: {len(successful_shots)}")
+        self.notify_observers(f"[Usage] Insights injected into prompts: {len(raw_rules)}")
 
         # 为solver添加初始任务计划
         if solver.private_memory:
@@ -181,7 +249,7 @@ class AutoGen(MetaMAS):
             insights=raw_rules,
             task_description=self.meta_memory.summarize()
         )
-        self.notify_observers(user_prompt)
+        self.notify_observers(f"[Prompt] Initial prompt built with {len(successful_shots)} success cases and {len(raw_rules)} insights.")
 
         # Main loop for task execution
         action_history: list = [] 
@@ -211,6 +279,7 @@ class AutoGen(MetaMAS):
                 retriever_action = ''
 
             if retriever_action != '':
+                self.notify_observers(f"[Turn {i+1}] Retriever action: {_short(retriever_action, 120)}")
                 retriever_message: AgentMessage = AgentMessage(
                     agent_name=retriever.name,
                     system_instruction=retriever.system_instruction,
@@ -241,6 +310,17 @@ class AutoGen(MetaMAS):
                         peer_name=solver.name,
                         current_status="waiting_for_action"
                     )
+
+                # 更新共享记忆：记录retriever的建议
+                shared_mem.add_agent_action(
+                    agent_name=retriever.name,
+                    action_type="suggestion",
+                    content=retriever_action,
+                    turn=i
+                )
+                self.notify_observers(f"[Shared Memory] Turn {i+1}: Retriever suggested action")
+            else:
+                self.notify_observers(f"[Turn {i+1}] Retriever action: (empty)")
 
             user_prompt: str = format_task_prompt_with_insights(
                 few_shots=few_shots,
@@ -288,10 +368,30 @@ class AutoGen(MetaMAS):
                         current_status="active"
                     )
 
+            # 更新共享记忆：记录solver的决策
+            shared_mem.add_agent_action(
+                agent_name=solver.name,
+                action_type="decision",
+                content=action,
+                turn=i
+            )
+            # 如果使用了retriever的建议，记录协作
+            if retriever_action != '':
+                shared_mem.record_collaboration(
+                    agent1=retriever.name,
+                    agent2=solver.name,
+                    interaction_type="suggestion_accepted",
+                    outcome="pending"
+                )
+                self.notify_observers(f"[Shared Memory] Turn {i+1}: Recorded Retriever→Solver collaboration")
+
             name: str = solver.name
             system_instruction = solver.system_instruction
 
             if self._solver_stuck(action, action_history):
+                self.notify_observers(
+                    f"[Turn {i+1}] Solver stuck on repeated action: {_short(action, 120)}. GroundTruth will intervene."
+                )
                 # 更新solver的私有memory：记录陷入循环
                 if solver.private_memory:
                     solver.private_memory.add_hypothesis(
@@ -342,6 +442,7 @@ class AutoGen(MetaMAS):
                     except Exception as e:
                         print(f'Error during execution of ground truth agent: {e}')
                     tries += 1
+                self.notify_observers(f"[Turn {i+1}] GroundTruth action: {_short(action, 120)}")
 
                 # 更新ground_truth的私有memory：记录新动作
                 if ground_truth.private_memory:
@@ -372,12 +473,15 @@ class AutoGen(MetaMAS):
             observation, reward, done = env.step(action)
             action_history.append(action)
 
+            self.notify_observers(
+                f"[Turn {i+1}] Actor={name} action={_short(action, 120)} | reward={reward} | done={done}"
+            )
             step_message: str = f'Act {i + 1}: {action}\nObs {i + 1}: {observation}'
             self.notify_observers(step_message)
 
             self.meta_memory.move_memory_state(action, observation, reward=reward)
 
-            # 更新所有相关agent的私有memory（基于环境反馈）
+            # ========== 更新所有相关agent的私有memory（基于环境反馈）==========
             # 更新执行agent（solver或ground_truth）的memory
             if name == solver.name and solver.private_memory:
                 solver.private_memory.add_key_observation(f"Act: {action[:40]} | Obs: {observation[:60]}")
@@ -390,6 +494,7 @@ class AutoGen(MetaMAS):
                 # 根据reward更新假设置信度
                 if reward > 0:
                     solver.private_memory.update_state_summary(f"Progress at turn {i+1}, reward: {reward:.2f}")
+                    self.notify_observers(f"[Private Memory] Solver: Positive reward {reward:.2f}, updated state")
 
                 # 如果使用了retriever建议，更新协作成功率
                 if retriever_action != '':
@@ -397,6 +502,7 @@ class AutoGen(MetaMAS):
                         peer_name=retriever.name,
                         success=(reward > 0)
                     )
+                    self.notify_observers(f"[Private Memory] Solver: Updated Retriever collaboration success")
 
             elif name == ground_truth.name and ground_truth.private_memory:
                 ground_truth.private_memory.add_key_observation(f"Intervention result: {observation[:60]}")
@@ -406,23 +512,85 @@ class AutoGen(MetaMAS):
                     source="environment",
                     relevance=1.0
                 )
+                self.notify_observers(f"[Private Memory] GroundTruth: Recorded intervention result")
+
+            # ========== 更新共享记忆：记录环境反馈 ==========
+            shared_mem.add_hop(
+                query=f"Turn {i+1} execution",
+                action=action,
+                observation=observation,
+                extracted_answer=None,
+                agent=name,
+                success=(reward > 0)
+            )
+
+            # 如果本轮有retriever→solver协作，更新协作结果
+            if retriever_action != '':
+                shared_mem.record_collaboration(
+                    agent1=retriever.name,
+                    agent2=solver.name,
+                    interaction_type="suggestion_execution",
+                    outcome="success" if reward > 0 else "failed"
+                )
+
+            # 打印共享记忆状态（调试）
+            if i % 5 == 0 or done:  # 每5轮或任务结束时打印
+                stats = shared_mem.get_statistics()
+                self.notify_observers(f"[Shared Memory] Stats: {stats['total_hops']} hops, {stats['successful_hops']} success, {stats['unique_searches']} searches")
 
             if done:
                 break
 
-        # Final feedback and memory update
+        # ========== Final feedback and memory update ==========
         final_reward, final_done, final_feedback = self.env.feedback()
         self.notify_observers(final_feedback)
         self.meta_memory.save_task_context(label=final_done, feedback=final_feedback)
         self.meta_memory.backward(final_done)
 
-        # 任务结束后，保存所有agent的私有memory快照（用于调试/分析）
+        # ========== 任务结束后的Memory更新 ==========
+
+        # 1. 更新私有记忆
         if final_done:
             if solver.private_memory:
                 solver.private_memory.update_task_status("main_task", "completed")
+                self.notify_observers(f"[Private Memory] Solver: Task completed successfully")
         else:
             if solver.private_memory:
                 solver.private_memory.add_challenge(f"Task failed: {final_feedback[:100]}")
+                self.notify_observers(f"[Private Memory] Solver: Recorded failure challenge")
+
+        # 2. 更新共享记忆
+        if final_done:
+            shared_mem.mark_completed(final_answer=final_feedback)
+        else:
+            shared_mem.mark_failed()
+
+        # 3. 打印最终Memory统计（调试）
+        self.notify_observers("\n" + "="*60)
+        self.notify_observers("[Memory Summary - Task Completed]")
+
+        # 共享记忆统计
+        shared_stats = shared_mem.get_statistics()
+        self.notify_observers(f"[Shared Memory] Final Stats:")
+        self.notify_observers(f"  - Total hops: {shared_stats['total_hops']}")
+        self.notify_observers(f"  - Successful hops: {shared_stats['successful_hops']}")
+        self.notify_observers(f"  - Failed hops: {shared_stats['failed_hops']}")
+        self.notify_observers(f"  - Unique searches: {shared_stats['unique_searches']}")
+        self.notify_observers(f"  - Agent interactions: {shared_stats['agent_interactions']}")
+
+        # 私有记忆统计
+        if solver.private_memory:
+            solver_summary = solver.private_memory.get_compact_summary()
+            self.notify_observers(f"[Private Memory] Solver: {solver_summary}")
+            self.notify_observers(f"  - Total turns: {solver.private_memory.turn_counter}")
+            self.notify_observers(f"  - Hypotheses count: {len(solver.private_memory.hypotheses_store.hypotheses)}")
+            self.notify_observers(f"  - Evidence count: {len(solver.private_memory.evidence_trace.evidences)}")
+            self.notify_observers(f"  - Peer profiles: {len(solver.private_memory.peer_profiles)}")
+
+        if retriever.private_memory:
+            self.notify_observers(f"[Private Memory] Retriever: {retriever.private_memory.turn_counter} turns, {len(retriever.private_memory.evidence_trace.evidences)} evidence")
+
+        self.notify_observers("="*60 + "\n")
 
         return final_reward, final_done   
     

@@ -39,7 +39,7 @@ class MemoryCurator:
     def _curate_with_llm(self, task_main: str, action: str, observation: str) -> Optional[Dict[str, Any]]:
         prompt = (
             "Extract key information as JSON only.\n"
-            "Required keys: answer, entities, facts, relations, next_queries, confidence.\n"
+            "Required keys: answer, entities, facts, relations, next_queries.\n"
             "facts: list of {key, value}. relations: list of {head, relation, tail}.\n"
             f"Task: {task_main}\n"
             f"Action: {action}\n"
@@ -101,7 +101,6 @@ class MemoryCurator:
             "facts": facts,
             "relations": relations,
             "next_queries": next_queries,
-            "confidence": 0.6 if answer else 0.0,
         }
 
     @staticmethod
@@ -134,7 +133,6 @@ class MemoryCurator:
             "facts": _list(data.get("facts")),
             "relations": _list(data.get("relations")),
             "next_queries": _list(data.get("next_queries")),
-            "confidence": float(data.get("confidence", 0.0) or 0.0),
         }
 
     @staticmethod
@@ -153,7 +151,6 @@ class MemoryCurator:
             merged[key] = b + o
         if not merged.get("answer"):
             merged["answer"] = other.get("answer")
-        merged["confidence"] = max(float(base.get("confidence", 0.0)), float(other.get("confidence", 0.0)))
         return merged
 
     @staticmethod
@@ -164,5 +161,4 @@ class MemoryCurator:
             "facts": [],
             "relations": [],
             "next_queries": [],
-            "confidence": 0.0,
         }

@@ -531,7 +531,6 @@ class AutoGen(MetaMAS):
             curated_next = curated.get("next_queries", []) if isinstance(curated, dict) else []
             curated_facts = curated.get("facts", []) if isinstance(curated, dict) else []
             curated_relations = curated.get("relations", []) if isinstance(curated, dict) else []
-            curated_conf = curated.get("confidence", 0.6) if isinstance(curated, dict) else 0.6
 
             # Log curator JSON to prompt logs for debugging
             if isinstance(curated, dict):
@@ -577,8 +576,7 @@ class AutoGen(MetaMAS):
                     solver.private_memory.add_evidence(
                         evidence_id=f"fact_{i}_{key}",
                         content=f"{key} = {val}",
-                        source="memory_curator",
-                        relevance=curated_conf
+                        source="memory_curator"
                     )
 
                 for r in curated_relations:
@@ -593,15 +591,13 @@ class AutoGen(MetaMAS):
                         step_id=f"rel_{i}",
                         premise=f"{head} --{rel}--> {tail}",
                         conclusion=f"Bridge: {tail}",
-                        reasoning_type="deduction",
-                        confidence=curated_conf
+                        reasoning_type="deduction"
                     )
 
                 if curated_answer:
                     solver.private_memory.add_hypothesis(
                         hypo_id=f"ans_{i}",
-                        content=f"Candidate answer: {curated_answer}",
-                        confidence=curated_conf
+                        content=f"Candidate answer: {curated_answer}"
                     )
 
             # ========== Shared Memory update ==========

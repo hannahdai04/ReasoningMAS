@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import re
+import json
 
 from mas.agents import Agent
 from mas.memory.common import MASMessage, AgentMessage
@@ -7,6 +9,7 @@ from mas.reasoning import ReasoningBase, ReasoningConfig
 from mas.memory import MASMemoryBase, GMemory
 from mas.agents import Env
 from mas.agents.shared_memory import SharedMemory
+from mas.agents.memory_curator import MemoryCurator
 from mas.utils import EmbeddingFunc
 
 from .autogen_prompt import AUTOGEN_PROMPT
@@ -94,6 +97,10 @@ class AutoGen(MetaMAS):
             SharedMemory().set_embedding_func(self._embedding_func)
 
         env_executor = env
+
+        # Memory curator (write-only helper)
+        llm_model = getattr(reasoning, "llm_model", None)
+        self._memory_curator = MemoryCurator(llm_model=llm_model)
 
         self.hire([
             solver_agent,
@@ -515,16 +522,115 @@ class AutoGen(MetaMAS):
                 self.notify_observers(f"[Private Memory] GroundTruth: Recorded intervention result")
 
             # ========== 更新共享记忆：记录环境反馈 ==========
+            # ========== Curator: structured memory write ==========
+            curated = {}
+            if getattr(self, "_memory_curator", None):
+                curated = self._memory_curator.curate(task_main, action, observation)
+
+            curated_answer = curated.get("answer") if isinstance(curated, dict) else None
+            curated_next = curated.get("next_queries", []) if isinstance(curated, dict) else []
+            curated_facts = curated.get("facts", []) if isinstance(curated, dict) else []
+            curated_relations = curated.get("relations", []) if isinstance(curated, dict) else []
+            curated_conf = curated.get("confidence", 0.6) if isinstance(curated, dict) else 0.6
+
+            # Log curator JSON to prompt logs for debugging
+            if isinstance(curated, dict):
+                has_signal = bool(
+                    curated.get("answer")
+                    or curated.get("facts")
+                    or curated.get("relations")
+                    or curated.get("next_queries")
+                    or curated.get("entities")
+                )
+                if has_signal:
+                    try:
+                        curated_json = json.dumps(curated, ensure_ascii=False)
+                    except Exception:
+                        curated_json = str(curated)
+                    self.notify_observers(f"[PromptLog][Curator][Turn {i+1}] {curated_json}")
+
+            # Private Memory -> LocalPlan / EvidenceTrace (solver only)
+            if solver.private_memory:
+                solver.private_memory.add_task(
+                    task_id=f"hop_{i}",
+                    description=f"{action}",
+                    status="completed" if curated_answer else "in_progress",
+                    priority=2
+                )
+                for j, q in enumerate(curated_next[:2]):
+                    if not q:
+                        continue
+                    q_text = q if q.startswith("Search[") else f"Search[{q}]"
+                    solver.private_memory.add_task(
+                        task_id=f"next_{i}_{j}",
+                        description=q_text,
+                        status="pending",
+                        priority=1,
+                        dependencies=[f"hop_{i}"]
+                    )
+
+                for k in curated_facts:
+                    key = k.get("key") if isinstance(k, dict) else None
+                    val = k.get("value") if isinstance(k, dict) else None
+                    if not key or val is None:
+                        continue
+                    solver.private_memory.add_evidence(
+                        evidence_id=f"fact_{i}_{key}",
+                        content=f"{key} = {val}",
+                        source="memory_curator",
+                        relevance=curated_conf
+                    )
+
+                for r in curated_relations:
+                    if not isinstance(r, dict):
+                        continue
+                    head = r.get("head")
+                    rel = r.get("relation")
+                    tail = r.get("tail")
+                    if not head or not rel or not tail:
+                        continue
+                    solver.private_memory.add_reasoning_step(
+                        step_id=f"rel_{i}",
+                        premise=f"{head} --{rel}--> {tail}",
+                        conclusion=f"Bridge: {tail}",
+                        reasoning_type="deduction",
+                        confidence=curated_conf
+                    )
+
+                if curated_answer:
+                    solver.private_memory.add_hypothesis(
+                        hypo_id=f"ans_{i}",
+                        content=f"Candidate answer: {curated_answer}",
+                        confidence=curated_conf
+                    )
+
+            # ========== Shared Memory update ==========
+            hop_query = action
+            match = re.match(r"^\w+\[(.+)\]$", action)
+            if match:
+                hop_query = match.group(1).strip()
+
             shared_mem.add_hop(
-                query=f"Turn {i+1} execution",
+                query=hop_query,
                 action=action,
                 observation=observation,
-                extracted_answer=None,
+                extracted_answer=curated_answer,
                 agent=name,
-                success=(reward > 0)
+                success=(reward >= 0 and "Invalid" not in observation)
             )
 
-            # 如果本轮有retriever→solver协作，更新协作结果
+            for k in curated_facts:
+                key = k.get("key") if isinstance(k, dict) else None
+                val = k.get("value") if isinstance(k, dict) else None
+                if key and val is not None:
+                    shared_mem.add_fact(key, val)
+
+            if shared_mem.task_status and curated_next:
+                est = shared_mem.task_status.current_hop + len(curated_next)
+                shared_mem.task_status.total_hops_estimated = max(
+                    shared_mem.task_status.total_hops_estimated, est
+                )
+
             if retriever_action != '':
                 shared_mem.record_collaboration(
                     agent1=retriever.name,

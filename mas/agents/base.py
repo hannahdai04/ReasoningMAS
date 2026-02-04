@@ -1,4 +1,5 @@
 from typing import TypeVar, Optional, Dict, Any, Callable
+import re
 
 from mas.reasoning import ReasoningBase, ReasoningConfig
 from mas.llm import Message
@@ -117,6 +118,51 @@ class Agent:
                 lines.append(f"- {self._short(str(q), 80)} -> {self._short(str(r), 80)}")
         return "\n".join(lines) if lines else "None"
 
+    def _build_retrieval_query(self, user_prompt: str, shared_mem: SharedMemory) -> str:
+        """
+        Build a focused retrieval query from action subquestion + bridge entity + task main.
+        Priority:
+        1) current subquestion (last hop query if available)
+        2) bridge entity (last hop extracted_answer or latest fact)
+        3) task description as fallback
+        """
+        subquery = None
+        last_hop = shared_mem.get_last_hop() if hasattr(shared_mem, "get_last_hop") else None
+        if last_hop and getattr(last_hop, "query", None):
+            subquery = str(last_hop.query).strip()
+        else:
+            # fallback: retriever suggestion or question line
+            for line in reversed(user_prompt.splitlines()):
+                if "Retriever suggestion:" in line:
+                    subquery = line.split("Retriever suggestion:", 1)[1].strip()
+                    break
+            if subquery:
+                m = re.search(r"\w+\[(.+)\]", subquery)
+                if m:
+                    subquery = m.group(1).strip()
+            else:
+                for line in reversed(user_prompt.splitlines()):
+                    if line.strip().startswith("Question:"):
+                        subquery = line.split("Question:", 1)[1].strip()
+                        break
+
+        bridge = None
+        if last_hop and getattr(last_hop, "extracted_answer", None):
+            bridge = last_hop.extracted_answer
+        elif getattr(shared_mem, "accumulated_facts", None):
+            try:
+                bridge = list(shared_mem.accumulated_facts.values())[-1]
+            except Exception:
+                bridge = None
+
+        task_desc = None
+        if shared_mem.task_status and getattr(shared_mem.task_status, "task_description", None):
+            task_desc = shared_mem.task_status.task_description
+
+        candidates = [p for p in [subquery, bridge, task_desc] if p]
+        parts = candidates[:2] if len(candidates) > 1 else candidates
+        return " | ".join(parts) if parts else user_prompt[:200]
+
     def response(self, user_prompt: str, reason_config: ReasoningConfig, debug: bool = False) -> str:
         """
         Agent响应方法 - 实现完整的 Read → Inject → Act 闭环
@@ -133,21 +179,23 @@ class Agent:
         private_retrieved = None
         shared_retrieved = None
 
-        # 1. 检索私有记忆
+        shared_mem = SharedMemory()
+        retrieval_query = self._build_retrieval_query(user_prompt, shared_mem)
+
+        # 1. ??????????
         private_prompt = ""
         if self.private_memory:
             private_retrieved = self.private_memory.retrieve_relevant(
-                current_query=user_prompt,
+                current_query=retrieval_query,
                 current_state="",
                 top_k=3
             )
             if debug:
                 print(f"[{self.name}] Private Memory Retrieved: {len(private_retrieved.get('relevant_reasoning', []))} reasoning, {len(private_retrieved.get('relevant_evidence', []))} evidence")
 
-        # 2. 检索共享记忆
-        shared_mem = SharedMemory()
+        # 2. ??????????
         shared_retrieved = shared_mem.retrieve_relevant(
-            current_query=user_prompt,
+            current_query=retrieval_query,
             current_state="",
             top_k=3
         )
@@ -202,6 +250,7 @@ class Agent:
             f"[PromptLog][Agent:{self.name}][#{self._response_count}] Response Preparation",
             f"- Retrieval Mode: private={private_mode}, shared={shared_mode}",
             f"- Raw User Prompt Chars: {len(user_prompt)}",
+            f"- Retrieval Query: {self._short(retrieval_query, 200)}",
         ]
 
         if self._response_count == 1:

@@ -3,7 +3,7 @@ set -euo pipefail
 
 OUT_DIR="${1:-data/hotpotqa}"
 FORCE="${2:-}"
-URL="https://hotpotqa.s3.amazonaws.com/hotpot_dev_distractor_v1.json"
+URL="https://huggingface.co/datasets/namlh2004/hotpotqa/resolve/main/hotpot_dev_distractor_v1.json?download=true"
 OUT_PATH="${OUT_DIR}/hotpot_dev_distractor_v1.json"
 
 mkdir -p "${OUT_DIR}"

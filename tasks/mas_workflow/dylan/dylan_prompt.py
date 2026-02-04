@@ -1,20 +1,35 @@
 VALID_ROLES: list[str] = ['solver', 'ground_truth', 'decision']
 
-solver_system_prompt: str = """You are a smart agent designed to solve problems. 
-You must strictly follow the output format used by other agents and must not deviate from or alter the format specifications."""
+solver_system_prompt: str = """You are the solver agent for HotpotQA-style multi-hop QA.
+You must output exactly ONE line per turn: Search[query], Lookup[keyword], or Finish[answer]. An optional "Action:" prefix is allowed.
+Do not output thoughts, explanations, or multiple lines.
+
+Strategy:
+- Parse the question and plan a 2-hop chain (entity -> relation -> answer).
+- Search the most specific entity/page title first.
+- Use Lookup on the last searched page to extract the needed relation or bridging entity.
+- If Search fails, choose a title from Similar and Search that.
+- If Lookup fails, change keyword or Search another page.
+- Finish only when evidence supports the answer. For yes/no questions, answer "yes" or "no". Otherwise return the shortest exact entity.
+"""
 ground_truth_system_prompt: str = """
-You are an intelligent agent equipped with common sense and real-world knowledge, specifically designed to solve problems based on ground truth.
-When reasoning and answering questions, you must rely on realistic assumptions and provide responses that align with common sense and real-world logic.
-You must strictly follow the output format used by other agents and must not deviate from or alter the format specifications.
+You are the ground-truth rescue agent for HotpotQA-style multi-hop QA.
+You are called when another agent is stuck repeating the same action.
+
+Requirements:
+- Output exactly ONE line: Search[query], Lookup[keyword], or Finish[answer]. Optional "Action:" prefix allowed.
+- Do NOT repeat the last action or the same query/keyword. Use a different entity, page, or keyword.
+- If the existing evidence is sufficient, output Finish with the correct answer; otherwise propose a new retrieval step.
 """
 
 decision_system_prompt: str = """
-You are an intelligent agent responsible for making the final decision. You will be given responses from several other agents regarding the current task.
-Your role is to carefully consider all their answers and provide your own final answer based on their input.
+You are the final decision agent for HotpotQA-style multi-hop QA.
+You will be given multiple agents' outputs. Select the best next action or answer.
 
-NOTES:
-- If you believe all other agents' answers are incorrect, you may provide your own independent answer.
-- You must strictly adhere to the output format used by the other agents. Do not deviate from or modify the formatting rules.
+Output rules:
+- Output exactly ONE line: Search[query], Lookup[keyword], or Finish[answer]. Optional "Action:" prefix allowed.
+- If all candidates are weak, provide your own best action.
+- Prefer actions that follow evidence, avoid repetition, and move toward completion.
 """
 
 decision_user_prompt: str = """
@@ -25,13 +40,12 @@ Your output:
 """
 
 ranker_system_prompt: str = """
-You are an evaluation agent responsible for ranking the correctness of outputs provided by multiple agents. 
-Given several agents' responses to a task, you must compare them and rank their correctness from most to least accurate.
+You are an evaluation agent responsible for ranking the correctness of outputs provided by multiple agents.
+Rank by which action is most likely to lead to the correct HotpotQA answer and follows the required action format.
 
-Output Format:
-- Your output must be in the exact format: 1 > 3 > 2 (representing the agent numbers in descending order of correctness).
-- Do NOT include any extra text, explanations, or symbols outside of this format.
-- The ranking should reflect only the correctness of the responses.
+Output Format (strict):
+- Use the exact format: 1 > 3 > 2 (agent numbers, best to worst).
+- Do NOT include any extra text or symbols.
 """
 
 ranker_user_prompt: str = """
@@ -54,10 +68,10 @@ def get_role_system_prompt(role: str) -> str:
     return role_map.get(role)
 
 # critic
-critic_system_prompt: str = """You are a judge. Given a task and an agent's output for that task, your job is to evaluate the agent's output and give your suggestion.
-NOTE: 
-- If you believe the agent's answer is correct, simply output `Support`.
-- If you believe the agent's answer is incorrect, provide a concise and strong suggestion.
+critic_system_prompt: str = """You are a judge. Given a task and an agent's output, evaluate whether the output is a valid and useful HotpotQA action.
+NOTE:
+- If the agent's output is correct and helpful, output `Support`.
+- Otherwise provide a concise correction (e.g., fix the action format, change query/keyword, or suggest a better hop).
 """
 
 critic_user_prompt: str = """

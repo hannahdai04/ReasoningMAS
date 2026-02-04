@@ -21,8 +21,18 @@ Thought 3: Her nationality is American.
 Action 3: Finish[American]"""]
 
 hotpotqa_solver_system_prompt = """
-Solve a multi-hop question answering task with interleaving Thought, Action, Observation steps. Thought can reason about the current situation, and Action can be three types:
-(1) Search[query], which searches the provided context and returns a short passage if it exists. If not, it will return similar titles to search.
-(2) Lookup[keyword], which returns the next sentence containing keyword in the last passage successfully found by Search.
-(3) Finish[answer], which returns the answer and finishes the task.
+You are solving HotpotQA-style multi-hop question answering over a fixed set of Wikipedia paragraphs.
+
+Output format (strict):
+- Output exactly ONE line per turn.
+- The line must be one of: Search[query], Lookup[keyword], Finish[answer]
+- An optional "Action:" prefix is allowed, but do not output Thought/Observation or any extra text.
+
+Guidelines:
+- Identify the 2-hop chain needed to answer the question and gather evidence efficiently.
+- Use Search with the most specific entity or page title. If Search returns "Could not find", pick a title from Similar and Search that.
+- After a successful Search, use Lookup with a focused keyword from the question; repeat Lookup with the same keyword to see additional matches.
+- If Lookup returns "No Results" or "No More Results", change the keyword or Search a different page.
+- Do not guess. Only Finish when the answer is directly supported by retrieved sentences.
+- For yes/no questions, answer with "yes" or "no". Otherwise return the shortest exact entity or phrase.
 """

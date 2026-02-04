@@ -329,7 +329,7 @@ class AutoGen(MetaMAS):
                 task_description=self.meta_memory.summarize()
             )
             if retriever_action != '':
-                user_prompt = f\"{user_prompt}\\n\\nRetriever suggestion: {retriever_action}\"
+                user_prompt = f"{user_prompt}\n\nRetriever suggestion: {retriever_action}"
             tries = 0
 
             while tries < 3:
@@ -430,7 +430,7 @@ class AutoGen(MetaMAS):
                     task_description=self.meta_memory.summarize()
                 )
                 if retriever_action != '':
-                    user_prompt = f\"{user_prompt}\\n\\nRetriever suggestion: {retriever_action}\"
+                    user_prompt = f"{user_prompt}\n\nRetriever suggestion: {retriever_action}"
                 tries = 0
                 while tries < 3:
                     try:

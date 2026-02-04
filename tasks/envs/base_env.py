@@ -40,7 +40,9 @@ class BaseRecorder:
 
         self.file_path = os.path.join(self.working_dir, self.namespace + '.log')
         os.makedirs(os.path.dirname(self.file_path), exist_ok=True) 
-        
+        self.prompt_logs_dir = os.path.join(self.working_dir, "prompt_logs")
+        os.makedirs(self.prompt_logs_dir, exist_ok=True)
+
         self.logger = logging.getLogger(self.namespace)
         self.logger.setLevel(logging.DEBUG)
 
@@ -84,7 +86,29 @@ class BaseRecorder:
     
     def log(self, message: str) -> None:    
 
+        if isinstance(message, str) and message.startswith("[PromptLog]"):
+            self._log_prompt(message)
+            return
         if hasattr(self, "logger") and self.logger:
             self.logger.info(message)
         else:
             print("Logger is not initialized.")
+
+    def _prompt_log_path(self) -> str:
+        task_id = self.current_task_id if self.current_task_id is not None else -1
+        return os.path.join(self.prompt_logs_dir, f"{self.namespace}_task_{task_id:04d}.log")
+
+    def _log_prompt(self, message: str) -> None:
+        path = self._prompt_log_path()
+        is_new = not os.path.exists(path)
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        with open(path, "a", encoding="utf-8") as f:
+            if is_new:
+                task_text = None
+                if isinstance(self.current_task_config, dict):
+                    task_text = self.current_task_config.get("task") or self.current_task_config.get("task_main")
+                f.write(f"=== Task {self.current_task_id} ===\n")
+                if task_text:
+                    f.write(f"Task Input: {task_text}\n")
+                f.write("\n")
+            f.write(f"{timestamp}\n{message.strip()}\n\n")

@@ -199,7 +199,7 @@ class Agent:
         approx_tokens = max(1, len(enhanced_prompt) // 4)
 
         log_lines = [
-            f"[Agent:{self.name}][#{self._response_count}] Response Preparation",
+            f"[PromptLog][Agent:{self.name}][#{self._response_count}] Response Preparation",
             f"- Retrieval Mode: private={private_mode}, shared={shared_mode}",
             f"- Raw User Prompt Chars: {len(user_prompt)}",
         ]

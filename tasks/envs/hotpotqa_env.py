@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 from .base_env import BaseEnv, BaseRecorder
-from .utils import match_exactly, f1_score
+from .utils import match_exactly, f1_score, normalize_answer
 
 
 class HotpotQAEnv(BaseEnv):
@@ -39,7 +39,12 @@ class HotpotQAEnv(BaseEnv):
         self.document = None
         self.lookup_str = ""
         self.lookup_index = 0
-        self.docs: list[dict[str, Any]] = []
+        # Preserve/rebuild docs if a task was already set; schedule() calls reset()
+        # after set_env(), which would otherwise wipe the context for HotpotQA.
+        if hasattr(self, "config") and isinstance(self.config, dict) and self.config.get("context") is not None:
+            self._build_docs(self.config.get("context"))
+        else:
+            self.docs: list[dict[str, Any]] = []
         self.last_prediction: Optional[str] = None
         self.last_em: Optional[float] = None
         self.last_f1: Optional[float] = None
@@ -71,9 +76,10 @@ class HotpotQAEnv(BaseEnv):
 
         if action_type == 'Finish':
             self.last_prediction = argument
+            is_correct = self.success_fn(argument)
             self.last_em = 1.0 if match_exactly(argument, self.config.get('answer')) else 0.0
             self.last_f1 = f1_score(argument, self.config.get('answer'))
-            if self.success_fn(argument):
+            if is_correct:
                 observation = 'Answer is CORRECT'
                 self.reward = 1
                 return observation, 1, True
@@ -170,7 +176,41 @@ class HotpotQAEnv(BaseEnv):
         return f"{result_prefix} {lookups[self.lookup_index]}"
 
     def success_fn(self, agent_ans: str) -> bool:
-        return match_exactly(agent_ans, self.config.get('answer'))
+        gold = normalize_answer(self.config.get('answer') or '')
+        pred = normalize_answer(agent_ans or '')
+        if gold in {'yes', 'no'}:
+            if pred == gold:
+                return True
+            pred_tokens = pred.split()
+            return len(pred_tokens) > 0 and pred_tokens[0] == gold
+        if gold == '':
+            return False
+        if match_exactly(agent_ans, self.config.get('answer')):
+            return True
+        candidate = self._extract_short_answer(agent_ans)
+        if match_exactly(candidate, self.config.get('answer')):
+            return True
+        gold_tokens = gold.split()
+        cand_tokens = normalize_answer(candidate).split()
+        if 0 < len(gold_tokens) <= 3 and len(cand_tokens) >= len(gold_tokens):
+            filler = {'in', 'on', 'at', 'of', 'to', 'from', 'for', 'by'}
+            while cand_tokens and cand_tokens[0] in filler:
+                cand_tokens = cand_tokens[1:]
+            if cand_tokens[:len(gold_tokens)] == gold_tokens:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_short_answer(text: str) -> str:
+        if text is None:
+            return ''
+        raw = str(text).strip()
+        raw = re.sub(r'^\s*(final\s+answer|the\s+answer|answer)\s*(is|:)?\s+', '', raw, flags=re.IGNORECASE)
+        raw = raw.split('\n')[0]
+        for sep in ['.', ';', '?', '!', ',', ':']:
+            if sep in raw:
+                raw = raw.split(sep)[0]
+        return raw.strip()
 
     def feedback(self) -> tuple[float, bool, str]:
         feedback: str = 'You successfully finished this task.' if self.reward == 1 else 'You failed the task.'

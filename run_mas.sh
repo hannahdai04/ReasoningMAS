@@ -9,9 +9,9 @@ fi
 # --mas_type:      autogen, dylan, macnet
 
 python3 tasks/run.py \
-    --task alfworld \
+    --task hotpotqa \
     --reasoning io \
     --mas_memory g-memory \
-    --max_trials 30 \
-    --mas_type macnet \
+    --max_trials 20 \
+    --mas_type autogen \
     --model Qwen/Qwen2.5-14B-Instruct \

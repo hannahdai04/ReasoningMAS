@@ -1,4 +1,4 @@
-﻿hotpotqa_few_shots = ["""Question: What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?
+hotpotqa_few_shots = ["""Question: What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?
 Thought 1: I need to identify who portrayed Corliss Archer in Kiss and Tell, then find that woman's government position.
 Action 1: Search[Kiss and Tell (1945 film)]
 Observation 1: Kiss and Tell (1945 film): Kiss and Tell is a 1945 American comedy film based on the play of the same name. The film stars Shirley Temple as Corliss Archer.
@@ -20,19 +20,5 @@ Observation 2: Julia Child: Julia Child was an American chef, author, and televi
 Thought 3: Her nationality is American.
 Action 3: Finish[American]"""]
 
-hotpotqa_solver_system_prompt = """
-You are solving HotpotQA-style multi-hop question answering over a fixed set of Wikipedia paragraphs.
-
-Output format (strict):
-- Output exactly ONE line per turn.
-- The line must be one of: Search[query], Lookup[keyword], Finish[answer]
-- An optional "Action:" prefix is allowed, but do not output Thought/Observation or any extra text.
-
-Guidelines:
-- Identify the 2-hop chain needed to answer the question and gather evidence efficiently.
-- Use Search with the most specific entity or page title. If Search returns "Could not find", pick a title from Similar and Search that.
-- After a successful Search, use Lookup with a focused keyword from the question; repeat Lookup with the same keyword to see additional matches.
-- If Lookup returns "No Results" or "No More Results", change the keyword or Search a different page.
-- Do not guess. Only Finish when the answer is directly supported by retrieved sentences.
-- For yes/no questions, answer with "yes" or "no". Otherwise return the shortest exact entity or phrase.
-"""
+# This prompt is intentionally left empty to use the AutoGen specific prompts instead
+hotpotqa_solver_system_prompt = ""
